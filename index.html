@@ -21,13 +21,29 @@
             font-family: Arial, sans-serif; 
             display: none; 
         }
+        #loading {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-size: 24px;
+            font-family: Arial, sans-serif;
+            z-index: 10;
+        }
         canvas { display: block; }
     </style>
 </head>
 <body class="bg-gray-900">
-    <div id="info">Click on a component to learn more!</div>
+    <div id="loading">Loading: 0%</div>
+    <div id="info">Click or tap a component to interact!</div>
     <div class="absolute bottom-4 left-4 text-white text-sm">
-        Use mouse to rotate, scroll to zoom
+        Use mouse to rotate, scroll to zoom, click/tap to interact
     </div>
     <script>
         // Scene setup
@@ -37,6 +53,14 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.body.appendChild(renderer.domElement);
 
+        // Add fallback cube
+        const cube = new THREE.Mesh(
+            new THREE.BoxGeometry(1, 1, 1),
+            new THREE.MeshBasicMaterial({ color: 0xff0000 })
+        );
+        scene.add(cube);
+        cube.visible = false;
+
         // Lighting
         const ambientLight = new THREE.AmbientLight(0x404040, 0.5);
         scene.add(ambientLight);
@@ -44,61 +68,178 @@
         directionalLight.position.set(0, 1, 1);
         scene.add(directionalLight);
 
+        // Spotlight for monitor
+        const spotlight = new THREE.SpotLight(0xffffff, 0, 10, Math.PI / 4, 0.5);
+        spotlight.position.set(0, 2, 2);
+        scene.add(spotlight);
+        scene.add(spotlight.target);
+
         // Orbit controls
         const controls = new THREE.OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
         controls.dampingFactor = 0.05;
 
-        // Load your GLB model
+        // Camera position
+        camera.position.set(0, 1, 5);
+
+        // Load GLB model
         const loader = new THREE.GLTFLoader();
-        let model;
+        let model, monitorMesh;
+        const loadingDiv = document.getElementById('loading');
+        const glbUrl = 'https://raw.githubusercontent.com/Madhav5074/desktop-pc-3d-website/main/desktop-pc.glb';
+
         loader.load(
-            'https://raw.githubusercontent.com/Madhav5074/desktop-pc-3d-website/main/desktop-pc.glb',
+            glbUrl,
             (gltf) => {
                 model = gltf.scene;
                 scene.add(model);
-                model.position.set(0, 0, 0); // Adjust position if needed
-                model.scale.set(1, 1, 1); // Adjust scale based on model size
+                model.position.set(0, 0, 0);
+                model.scale.set(1, 1, 1);
+                cube.visible = false;
 
-                // Assign metadata to components
+                // Log all mesh names and assign userData
+                console.log('Available meshes:');
                 model.traverse((child) => {
                     if (child.isMesh) {
+                        console.log('-', child.name || 'Unnamed mesh');
                         child.userData = child.userData || {};
-                        child.userData.name = child.name || 'Unknown Component';
-                        child.userData.description = child.userData.description || `This is the ${child.name || 'component'}. Customize this description for details.`;
+                        child.userData.name = child.name || 'Unnamed Component';
+                        child.userData.description = {
+                            'Object_13': 'The display screen for the PC.',
+                            'Case': 'The main tower housing the CPU, GPU, and motherboard.',
+                            'Keyboard': 'The input device for typing.'
+                        }[child.name] || `This is the ${child.userData.name}.`;
+                        if (child.name === 'Object_13') {
+                            monitorMesh = child;
+                            child.userData.originalMaterial = child.material.clone();
+                            console.log('Monitor mesh assigned:', child.name);
+                        }
                     }
                 });
+                if (!monitorMesh) console.error('Monitor mesh (Object_13) not found in model');
+                loadingDiv.style.display = 'none';
+                console.log('Model loaded successfully from:', glbUrl);
             },
-            undefined,
-            (error) => console.error('Error loading model:', error)
+            (xhr) => {
+                const percent = (typeof xhr.loaded === 'number' && typeof xhr.total === 'number' && xhr.total > 0)
+                    ? Math.round((xhr.loaded / xhr.total) * 100)
+                    : 0;
+                loadingDiv.textContent = `Loading: ${percent}%`;
+                console.log(`Loading progress: ${percent}%`);
+            },
+            (error) => {
+                console.error('Error loading model from', glbUrl, ':', error);
+                loadingDiv.textContent = 'Error loading model. Showing fallback.';
+                cube.visible = true;
+                setTimeout(() => { loadingDiv.style.display = 'none'; }, 3000);
+            }
         );
-
-        // Camera position
-        camera.position.set(0, 1, 5); // Adjust based on model size
 
         // Raycaster for interaction
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
         const infoDiv = document.getElementById('info');
+        let lastHighlighted;
 
-        function onMouseClick(event) {
+        // Create dynamic texture for monitor
+        function createMonitorTexture(text) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512;
+            canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '40px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        // Focus camera on monitor
+        function focusCameraOnMonitor() {
+            if (!monitorMesh) {
+                console.error('Cannot focus camera: Monitor mesh not found');
+                return;
+            }
+            const box = new THREE.Box3().setFromObject(monitorMesh);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+
+            // Default to +X-facing screen (adjust based on your model)
+            const targetPosition = new THREE.Vector3(
+                center.x + size.x * 1.5, // Change to center.x, center.y, or center.z ± size.[axis] * 1.5 based on orientation
+                center.y,
+                center.z
+            );
+
+            // Smoothly move camera
+            const startPos = camera.position.clone();
+            const startTime = performance.now();
+            const duration = 1000;
+            function animateCamera(time) {
+                const elapsed = time - startTime;
+                const t = Math.min(elapsed / duration, 1);
+                camera.position.lerpVectors(startPos, targetPosition, t);
+                camera.lookAt(center);
+                if (t < 1) requestAnimationFrame(animateCamera);
+            }
+            requestAnimationFrame(animateCamera);
+        }
+
+        function handleInteraction(event) {
             event.preventDefault();
-            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            const isTouch = event.type === 'touchstart';
+            const clientX = isTouch ? event.touches[0].clientX : event.clientX;
+            const clientY = isTouch ? event.touches[0].clientY : event.clientY;
+            mouse.x = (clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(clientY / window.innerHeight) * 2 + 1;
 
             raycaster.setFromCamera(mouse, camera);
-            const intersects = raycaster.intersectObjects(scene.children, true);
+            const intersects = raycaster.intersectObjects(model ? model.children : scene.children, true);
+
+            if (lastHighlighted && lastHighlighted !== monitorMesh) {
+                lastHighlighted.material.emissive.set(0x000000);
+            }
+            spotlight.intensity = 0;
 
             if (intersects.length > 0) {
                 const object = intersects[0].object;
-                infoDiv.textContent = `${object.userData.name}: ${object.userData.description}`;
+                console.log('Clicked mesh:', object.name || 'Unnamed', 'userData:', object.userData);
+                infoDiv.textContent = `${object.userData.name || 'Unknown'}: ${object.userData.description || 'No description'}`;
                 infoDiv.style.display = 'block';
+
+                if (object === monitorMesh) {
+                    spotlight.intensity = 1;
+                    spotlight.target = object;
+                    object.material.emissive.set(0x333333);
+                    lastHighlighted = object;
+
+                    object.material.map = createMonitorTexture('Hello, World!');
+                    object.material.needsUpdate = true;
+
+                    focusCameraOnMonitor();
+                } else {
+                    if (monitorMesh && monitorMesh.userData.originalMaterial) {
+                        monitorMesh.material.map = monitorMesh.userData.originalMaterial.map;
+                        monitorMesh.material.needsUpdate = true;
+                    }
+                    lastHighlighted = object;
+                    object.material.emissive.set(0x333333);
+                }
             } else {
                 infoDiv.style.display = 'none';
+                if (monitorMesh && monitorMesh.userData.originalMaterial) {
+                    monitorMesh.material.map = monitorMesh.userData.originalMaterial.map;
+                    monitorMesh.material.needsUpdate = true;
+                }
+                console.log('No mesh clicked');
             }
         }
 
-        window.addEventListener('click', onMouseClick);
+        window.addEventListener('click', handleInteraction);
+        window.addEventListener('touchstart', handleInteraction);
 
         // Handle window resize
         window.addEventListener('resize', () => {
